@@ -9,7 +9,7 @@ on:
     paths:
       - 'ci-*.java'
       - 'ci-*.xml'
-      - '.github/workflows/build-checkin.yml'
+      - '.github/workflows/build.yml'
 
 jobs:
   build:
@@ -47,6 +47,13 @@ jobs:
           sed -i 's/minSdkVersion = .*/minSdkVersion = 24/' android/variables.gradle
           grep minSdkVersion android/variables.gradle
 
+      - name: 添加 OCR 依赖
+        run: |
+          RAW=https://raw.githubusercontent.com/2025wst/zzu-checkin/main
+          curl -fsSL -o /tmp/add_dep.py "$RAW/ci_add_dep.py"
+          python3 /tmp/add_dep.py
+          grep -A3 '^dependencies {' android/app/build.gradle
+
       - name: 拉取并写入源码
         run: |
           set -e
@@ -64,6 +71,7 @@ jobs:
           curl -fsSL -o "$D/BootReceiver.java" "$RAW/ci-BootReceiver.java"
           curl -fsSL -o "$D/Notify.java" "$RAW/ci-Notify.java"
           curl -fsSL -o "$D/DeviceProfile.java" "$RAW/ci-DeviceProfile.java"
+          curl -fsSL -o "$D/OcrFinder.java" "$RAW/ci-OcrFinder.java"
           curl -fsSL -o "$V/strings_checkin.xml" "$RAW/ci-strings_checkin.xml"
           curl -fsSL -o "$X/accessibility_service_config.xml" "$RAW/ci-accessibility_service_config.xml"
           curl -fsSL -o android/app/src/main/AndroidManifest.xml "$RAW/ci-AndroidManifest.xml"
