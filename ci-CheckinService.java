@@ -100,6 +100,7 @@ public class CheckinService extends AccessibilityService {
     private int entryMiss = 0;        // 连续没看到入口的次数
     private int searchStage = 0;      // 0=未开始 1=已点搜索框 2=已输入关键字 3=已点结果
     private long lastSearchAt = 0;
+    private boolean ocrTried = false;
 
     // ------------------------------------------------------------------ 生命周期
 
@@ -442,6 +443,23 @@ public class CheckinService extends AccessibilityService {
             //    支持连点多个候选位置（tap.txt 里用分号分隔），提高一次命中率
             java.util.List<float[]> pts = readTapPoints();
             boolean pageReady = pageSeenAt > 0 && System.currentTimeMillis() - pageSeenAt > 4000;
+
+            // 4a) 先让 OCR 看一眼：直接在屏幕上找「签到」两个字。
+            //     换任何平板、任何布局都能定位，不用猜坐标。
+            if (pageReady && !ocrTried) {
+                ocrTried = true;
+                int minY = winRect.top + Math.round(winRect.height() * 0.45f);
+                int[] target = OcrFinder.findButton(this, minY);
+                if (target != null) {
+                    boolean okTap = tapAbs(target[0], target[1]);
+                    lastTapAt = System.currentTimeMillis();
+                    tapIndex = 99;
+                    CheckinStatus.appendLog("OCR 点击 " + target[0] + "," + target[1]
+                            + (okTap ? " 已注入" : " 注入失败"));
+                    CheckinStatus.setLastResult("已按 OCR 识别位置点击，等待结果…");
+                    return;
+                }
+            }
 
             // 窗口内相对位置：x=50%，y 依次 82% / 84.5% / 87%（按钮是一条很宽的横条）
             final float[] RY = { 0.82f, 0.845f, 0.87f };
