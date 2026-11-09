@@ -50,6 +50,11 @@ public class MainActivity extends Activity {
     private TextView tvStage;
     private TextView tvLog;
     private Button btnTest;
+    private TextView tvChecklist;
+    private TextView tvNotify;
+    private TextView tvBattery;
+    private TextView tvOverlay;
+    private TextView tvAutoStart;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -140,15 +145,45 @@ public class MainActivity extends Activity {
         tip.setPadding(0, pad / 4, 0, pad);
         root.addView(tip);
 
-        tvAccessibility = addRow(root, "无障碍服务", "检测中…");
+        // ---- 一键配置引导（新）----
+        TextView secSetup = new TextView(this);
+        secSetup.setText("第一步：完成下面 6 项设置");
+        secSetup.setTextSize(15);
+        secSetup.setTextColor(Color.parseColor("#16181D"));
+        secSetup.setPadding(0, 0, 0, pad / 4);
+        root.addView(secSetup);
+
+        tvChecklist = new TextView(this);
+        tvChecklist.setTextSize(13);
+        tvChecklist.setTextColor(Color.parseColor("#D64545"));
+        tvChecklist.setPadding(0, 0, 0, pad / 2);
+        root.addView(tvChecklist);
+
+        tvAccessibility = addRow(root, "① 无障碍", "检测中…");
+        tvNotify = addRow(root, "② 通知", "检测中…");
+        tvBattery = addRow(root, "③ 电池", "检测中…");
+        tvOverlay = addRow(root, "④ 悬浮窗", "检测中…");
+        tvAutoStart = addRow(root, "⑤ 自启动", "需手动确认");
+
+        addButton(root, "① 开启无障碍服务（最关键）", v -> openAccessibility());
+        addButton(root, "② 允许通知（打卡结果要能看见）", v -> openNotification());
+        addButton(root, "③ 关闭电池优化（防止被系统杀）", v -> openBattery());
+        addButton(root, "④ 允许显示在其他应用上层", v -> openOverlay());
+        addButton(root, "⑤ 打开自启动设置（按品牌自动跳转）",
+                v -> DeviceProfile.openAutoStartSettings(MainActivity.this));
+        addButton(root, "⑥ 允许精确闹钟", v -> openExactAlarm());
+
+        TextView secRun = new TextView(this);
+        secRun.setText("第二步：确认运行状态");
+        secRun.setTextSize(15);
+        secRun.setTextColor(Color.parseColor("#16181D"));
+        secRun.setPadding(0, pad, 0, pad / 4);
+        root.addView(secRun);
+
         tvAlarm = addRow(root, "定时", "");
         tvLast = addRow(root, "上次结果", "");
         tvStage = addRow(root, "正在进行", "");
 
-        addButton(root, "① 开启无障碍服务", v -> openAccessibility());
-        addButton(root, "② 允许显示在其他应用上层", v -> openOverlay());
-        addButton(root, "③ 允许精确闹钟", v -> openExactAlarm());
-        addButton(root, "④ 关闭电池优化（防止被杀）", v -> openBattery());
         addButton(root, "设置打卡时间", v -> pickTime());
 
         btnTest = addButton(root, "立即测试一次", v -> startAutoFlow());
@@ -211,6 +246,39 @@ public class MainActivity extends Activity {
             tvAccessibility.setText(acc ? "✅ 已开启" : "❌ 未开启（点下面第 ① 个按钮）");
             tvAccessibility.setTextColor(acc ? Color.parseColor("#2F9E6E") : Color.parseColor("#D64545"));
         }
+        // ---- 六项配置检查 ----
+        int todo = 0;
+        if (tvNotify != null) {
+            boolean ok = hasNotification();
+            tvNotify.setText(ok ? "✅ 已允许" : "❌ 未允许（点第 ② 个按钮）");
+            tvNotify.setTextColor(ok ? OK : BAD);
+            if (!ok) todo++;
+        }
+        if (tvBattery != null) {
+            boolean ok = isBatteryIgnored();
+            tvBattery.setText(ok ? "✅ 已不受限制" : "❌ 建议关闭电池优化（点第 ③ 个按钮）");
+            tvBattery.setTextColor(ok ? OK : BAD);
+            if (!ok) todo++;
+        }
+        if (tvOverlay != null) {
+            boolean ok = Settings.canDrawOverlays(this);
+            tvOverlay.setText(ok ? "✅ 已允许" : "⚠️ 未允许（影响唤醒能力）");
+            tvOverlay.setTextColor(ok ? OK : BAD);
+            if (!ok) todo++;
+        }
+        if (tvAutoStart != null) {
+            tvAutoStart.setText("⚠️ 需手动确认（点第 ⑤ 个按钮跳转）");
+            tvAutoStart.setTextColor(Color.parseColor("#B7791F"));
+        }
+        if (!acc) {
+            todo++;
+        }
+        if (tvChecklist != null) {
+            tvChecklist.setText(todo == 0
+                    ? "✅ 基本就绪，可以正常使用"
+                    : "还差 " + todo + " 项必选项，完成后才能正常打卡");
+        }
+
         if (tvAlarm != null) {
             boolean exact = CheckinAlarm.canExact(this);
             long at = CheckinAlarm.nextTriggerAt(this);
@@ -238,6 +306,49 @@ public class MainActivity extends Activity {
                 sb.append(logs.get(i)).append('\n');
             }
             tvLog.setText(sb.length() == 0 ? "（暂无日志）" : sb.toString());
+        }
+    }
+
+    private static final int OK = 0xFF2F9E6E;
+    private static final int BAD = 0xFFD64545;
+
+    /** 是否允许通知（安卓 13+ 才是运行时权限）。 */
+    private boolean hasNotification() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                return checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                        == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            }
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            return nm == null || nm.areNotificationsEnabled();
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /** 是否已加入电池优化白名单。 */
+    private boolean isBatteryIgnored() {
+        try {
+            android.os.PowerManager pm =
+                    (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+            return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 申请通知权限（安卓 13+ 会弹系统框，低版本直接跳设置）。 */
+    private void openNotification() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                requestPermissions(new String[]{ "android.permission.POST_NOTIFICATIONS" }, 90);
+                return;
+            }
+            Intent i = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+            i.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+            startActivity(i);
+        } catch (Throwable t) {
+            toast("请到 设置 → 应用 → 通知 里手动允许");
         }
     }
 
