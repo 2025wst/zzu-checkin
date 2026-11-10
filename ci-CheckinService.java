@@ -211,6 +211,7 @@ public class CheckinService extends AccessibilityService {
         pageSeenAt = 0;
         bringStep = 0;
         lastBringAt = 0;
+        ocrTried = false;   // 每轮都允许 OCR 重新找一次
     }
 
     // ------------------------------------------------------------------ 状态机
@@ -667,10 +668,23 @@ public class CheckinService extends AccessibilityService {
                 public void run() {
                     try {
                         Thread.sleep(okDone ? 2500L : 3 * 60 * 1000L);
-                        boolean locked = performGlobalAction(
-                                AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN);
-                        CheckinStatus.appendLog((okDone ? "打卡成功" : "失败 3 分钟")
-                                + (locked ? "，已自动锁屏" : "，锁屏请求被系统拒绝"));
+                        boolean locked = false;
+                        for (int i = 0; i < 3 && !locked; i++) {
+                            locked = performGlobalAction(
+                                    AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN);
+                            if (!locked) {
+                                Thread.sleep(800);
+                            }
+                        }
+                        // 华为有些版本"收下指令但不熄屏"：等 2.5 秒看屏幕还亮不亮
+                        Thread.sleep(2500);
+                        if (screenIsOnNow()) {
+                            CheckinStatus.appendLog("锁屏指令无效，改用息屏超时兜底");
+                            dropScreenTimeoutTemporarily();
+                        } else {
+                            CheckinStatus.appendLog((okDone ? "打卡成功" : "失败")
+                                    + (locked ? "，已自动锁屏" : "，屏幕已灭"));
+                        }
                     } catch (Throwable t) {
                         CheckinStatus.appendLog("自动锁屏失败：" + t.getMessage());
                     }
@@ -687,6 +701,50 @@ public class CheckinService extends AccessibilityService {
         }
         if (success) {
             CheckinStatus.closeActivitySoon();
+        }
+    }
+
+    /** 屏幕现在是否亮着。 */
+    private boolean screenIsOnNow() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            return pm != null && pm.isInteractive();
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /**
+     * 兜底熄屏：临时把系统息屏时间改成 15 秒，20 秒后恢复原值。
+     * 需要「修改系统设置」权限（WRITE_SETTINGS），没有就只记日志。
+     */
+    private void dropScreenTimeoutTemporarily() {
+        int original;
+        try {
+            original = android.provider.Settings.System.getInt(getContentResolver(),
+                    android.provider.Settings.System.SCREEN_OFF_TIMEOUT);
+        } catch (Throwable t) {
+            original = -1;
+        }
+        try {
+            boolean ok = android.provider.Settings.System.putInt(getContentResolver(),
+                    android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 15000);
+            CheckinStatus.appendLog("临时息屏 15 秒：" + (ok ? "成功" : "无权限"));
+            if (!ok) {
+                return;
+            }
+        } catch (Throwable t) {
+            CheckinStatus.appendLog("改息屏时间失败：" + t.getMessage());
+            return;
+        }
+        try {
+            Thread.sleep(20000);
+            if (original > 0) {
+                android.provider.Settings.System.putInt(getContentResolver(),
+                        android.provider.Settings.System.SCREEN_OFF_TIMEOUT, original);
+                CheckinStatus.appendLog("息屏时间已恢复为 " + (original / 1000) + " 秒");
+            }
+        } catch (Throwable ignored) {
         }
     }
 
