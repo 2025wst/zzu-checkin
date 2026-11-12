@@ -43,6 +43,12 @@ public class CheckinService extends AccessibilityService {
     /** 首页入口的文字（完全相等匹配） */
     private static final String[] ENTRY_TEXTS = { "定位打卡" };
 
+    /** 首页没有入口时，用这个关键字搜 */
+    private static final String SEARCH_KEYWORD = "查寝";
+
+    /** 搜索结果里认这些字眼 */
+    private static final String[] SEARCH_RESULT_KEYS = { "查寝", "定位打卡", "查寝签到", "在寝" };
+
     /** 打卡按钮可能的文字（完全相等匹配） */
     private static final String[] BUTTON_TEXTS = {
             "打卡", "立即打卡", "签到", "立即签到", "确认打卡", "确定打卡",
@@ -90,12 +96,21 @@ public class CheckinService extends AccessibilityService {
     private long lastBringAt = 0;
     private String result = "";
 
+    // ---- v2：首页没有「定位打卡」入口时，自动走搜索 ----
+    private int entryMiss = 0;        // 连续没看到入口的次数
+    private int searchStage = 0;      // 0=未开始 1=已点搜索框 2=已输入关键字 3=已点结果
+    private long lastSearchAt = 0;
+    private boolean ocrTried = false;
+    private int ocrTries = 0;      // 本轮 OCR 点了多少次（最多 3 次）
+
     // ------------------------------------------------------------------ 生命周期
 
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
         instance = this;
+        CheckinStatus.appendLog("设备：" + DeviceProfile.brandName());
+        CheckinStatus.appendLog("系统建议：" + DeviceProfile.advice());
         // 故意不调用 setServiceInfo()：
         // 在 onServiceConnected 里改服务配置会让框架重连自己，
         // 连接一直处于"握手未完成"，随后 getRootInActiveWindow() 会永久阻塞。
@@ -197,6 +212,8 @@ public class CheckinService extends AccessibilityService {
         pageSeenAt = 0;
         bringStep = 0;
         lastBringAt = 0;
+        ocrTried = false;   // 每轮都允许 OCR 重新找一次
+        ocrTries = 0;
     }
 
     // ------------------------------------------------------------------ 状态机
@@ -376,10 +393,85 @@ public class CheckinService extends AccessibilityService {
                 return;
             }
 
+            // 3b) 首页没有「定位打卡」入口（很多同学的首页确实没有）
+            //     → 走搜索：点搜索框 → 输入「查寝」→ 点结果
+            if (searchStage == 0) {
+                entryMiss++;
+                if (entryMiss >= 6) {
+                    Hit box = findSearchBox(root);
+                    if (box != null) {
+                        boolean ok = clickNode(box.node);
+                        recycle(box.node);
+                        searchStage = 1;
+                        entryMiss = 0;
+                        lastSearchAt = System.currentTimeMillis();
+                        CheckinStatus.appendLog("首页没有入口，点顶部搜索框 " + (ok ? "成功" : "失败"));
+                        CheckinStatus.setLastResult("正在搜索「查寝」…");
+                        return;
+                    }
+                }
+            } else if (searchStage == 1
+                    && System.currentTimeMillis() - lastSearchAt > 1200) {
+                AccessibilityNodeInfo input = findEditable(root);
+                if (input != null) {
+                    boolean ok = setNodeText(input, SEARCH_KEYWORD);
+                    recycle(input);
+                    searchStage = 2;
+                    lastSearchAt = System.currentTimeMillis();
+                    CheckinStatus.appendLog("搜索框输入「" + SEARCH_KEYWORD + "」 " + (ok ? "成功" : "失败"));
+                    CheckinStatus.setLastResult("正在打开搜索结果…");
+                    return;
+                }
+            } else if (searchStage == 2
+                    && System.currentTimeMillis() - lastSearchAt > 1500) {
+                Hit found = findContains(root, SEARCH_RESULT_KEYS);
+                if (found != null) {
+                    boolean ok = clickNode(found.node);
+                    recycle(found.node);
+                    searchStage = 3;
+                    CheckinStatus.appendLog("从搜索结果点「" + found.label + "」 " + (ok ? "成功" : "失败"));
+                    CheckinStatus.setLastResult("已从搜索结果进入，等待加载…");
+                    lastSearchAt = System.currentTimeMillis();
+                    return;
+                }
+                // 结果里也没找到，重来一轮
+                if (System.currentTimeMillis() - lastSearchAt > 6000) {
+                    searchStage = 0;
+                    entryMiss = 0;
+                    CheckinStatus.appendLog("搜索结果里没找到打卡入口，稍后重试");
+                }
+            }
+
             // 4) 页面在、但内容读不到（学习通关掉了 WebView 无障碍）→ 坐标盲点
             //    支持连点多个候选位置（tap.txt 里用分号分隔），提高一次命中率
             java.util.List<float[]> pts = readTapPoints();
-            boolean pageReady = pageSeenAt > 0 && System.currentTimeMillis() - pageSeenAt > 4000;
+            boolean pageReady = pageSeenAt > 0 && System.currentTimeMillis() - pageSeenAt > 6000;
+
+            // 4a) 先让 OCR 看一眼：直接在屏幕上找「签到」两个字。
+            //     换任何平板、任何布局都能定位，不用猜坐标。
+            if (pageReady && !ocrTried) {
+                ocrTried = true;
+                ocrTries++;
+                int minY = winRect.top + Math.round(winRect.height() * 0.45f);
+                int[] target = OcrFinder.findButton(this, minY);
+                // 保险：OCR 结果必须落在打卡页那个窗口里，
+                // 否则说明坐标算错了（比如华为分屏时点到了左边首页面板）
+                if (target != null && !winRect.isEmpty()
+                        && !winRect.contains(target[0], target[1])) {
+                    CheckinStatus.appendLog("OCR 坐标不在打卡窗口内，忽略 ("
+                            + target[0] + "," + target[1] + ")");
+                    target = null;
+                }
+                if (target != null) {
+                    boolean okTap = tapAbs(target[0], target[1]);
+                    lastTapAt = System.currentTimeMillis();
+                    tapIndex = 99;
+                    CheckinStatus.appendLog("OCR 点击 " + target[0] + "," + target[1]
+                            + (okTap ? " 已注入" : " 注入失败"));
+                    CheckinStatus.setLastResult("已按 OCR 识别位置点击，等待结果…");
+                    return;
+                }
+            }
 
             // 窗口内相对位置：x=50%，y 依次 82% / 84.5% / 87%（按钮是一条很宽的横条）
             final float[] RY = { 0.82f, 0.845f, 0.87f };
@@ -418,6 +510,15 @@ public class CheckinService extends AccessibilityService {
 
             // 5) 全部点完，静置几秒收尾
             if (pageReady && tapIndex >= total && System.currentTimeMillis() - lastTapAt > 6000) {
+                // OCR / 盲点都点过了还没看到"签到成功"：
+                // OPPO 上页面渲染慢，第一次常常点空。等 12 秒再来一轮，最多 3 轮。
+                if (ocrTries < 3) {
+                    CheckinStatus.appendLog("还没看到成功，第 " + (ocrTries + 1) + " 轮重试");
+                    ocrTried = false;
+                    tapIndex = 0;
+                    pageSeenAt = System.currentTimeMillis();
+                    return;
+                }
                 finishInfo("已连点 " + tapIndex + " 次，请在 App 里看结果");
                 return;
             }
@@ -587,10 +688,23 @@ public class CheckinService extends AccessibilityService {
                 public void run() {
                     try {
                         Thread.sleep(okDone ? 2500L : 3 * 60 * 1000L);
-                        boolean locked = performGlobalAction(
-                                AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN);
-                        CheckinStatus.appendLog((okDone ? "打卡成功" : "失败 3 分钟")
-                                + (locked ? "，已自动锁屏" : "，锁屏请求被系统拒绝"));
+                        boolean locked = false;
+                        for (int i = 0; i < 3 && !locked; i++) {
+                            locked = performGlobalAction(
+                                    AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN);
+                            if (!locked) {
+                                Thread.sleep(800);
+                            }
+                        }
+                        // 华为有些版本"收下指令但不熄屏"：等 2.5 秒看屏幕还亮不亮
+                        Thread.sleep(2500);
+                        if (screenIsOnNow()) {
+                            CheckinStatus.appendLog("锁屏指令无效，改用息屏超时兜底");
+                            dropScreenTimeoutTemporarily();
+                        } else {
+                            CheckinStatus.appendLog((okDone ? "打卡成功" : "失败")
+                                    + (locked ? "，已自动锁屏" : "，屏幕已灭"));
+                        }
                     } catch (Throwable t) {
                         CheckinStatus.appendLog("自动锁屏失败：" + t.getMessage());
                     }
@@ -607,6 +721,50 @@ public class CheckinService extends AccessibilityService {
         }
         if (success) {
             CheckinStatus.closeActivitySoon();
+        }
+    }
+
+    /** 屏幕现在是否亮着。 */
+    private boolean screenIsOnNow() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            return pm != null && pm.isInteractive();
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /**
+     * 兜底熄屏：临时把系统息屏时间改成 15 秒，20 秒后恢复原值。
+     * 需要「修改系统设置」权限（WRITE_SETTINGS），没有就只记日志。
+     */
+    private void dropScreenTimeoutTemporarily() {
+        int original;
+        try {
+            original = android.provider.Settings.System.getInt(getContentResolver(),
+                    android.provider.Settings.System.SCREEN_OFF_TIMEOUT);
+        } catch (Throwable t) {
+            original = -1;
+        }
+        try {
+            boolean ok = android.provider.Settings.System.putInt(getContentResolver(),
+                    android.provider.Settings.System.SCREEN_OFF_TIMEOUT, 15000);
+            CheckinStatus.appendLog("临时息屏 15 秒：" + (ok ? "成功" : "无权限"));
+            if (!ok) {
+                return;
+            }
+        } catch (Throwable t) {
+            CheckinStatus.appendLog("改息屏时间失败：" + t.getMessage());
+            return;
+        }
+        try {
+            Thread.sleep(20000);
+            if (original > 0) {
+                android.provider.Settings.System.putInt(getContentResolver(),
+                        android.provider.Settings.System.SCREEN_OFF_TIMEOUT, original);
+                CheckinStatus.appendLog("息屏时间已恢复为 " + (original / 1000) + " 秒");
+            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -893,6 +1051,121 @@ public class CheckinService extends AccessibilityService {
      * 祖先通常是容器（RelativeLayout 之类），没有 text，
      * 早先版本用祖先的 text 当标签会得到空串，导致永远判定"不能点"而静默跳过。
      */
+    /** 首页顶部的搜索入口：优先找「搜索」两字，其次找输入框。 */
+    private Hit findSearchBox(AccessibilityNodeInfo root) {
+        Hit byText = findExact(root, new String[]{ "搜索", "搜索课程", "请输入" });
+        if (byText != null) {
+            return byText;
+        }
+        AccessibilityNodeInfo input = findEditable(root);
+        if (input != null) {
+            return new Hit(input, "输入框");
+        }
+        return null;
+    }
+
+    /** 找一个可编辑的输入框（学习通的搜索框是 EditText）。 */
+    private AccessibilityNodeInfo findEditable(AccessibilityNodeInfo root) {
+        try {
+            List<AccessibilityNodeInfo> all = root.findAccessibilityNodeInfosByViewId(null);
+            if (all != null) {
+                recycleAll(all);
+            }
+        } catch (Throwable ignored) {
+        }
+        return findEditableRec(root, 0);
+    }
+
+    private AccessibilityNodeInfo findEditableRec(AccessibilityNodeInfo node, int depth) {
+        if (node == null || depth > 25) {
+            return null;
+        }
+        try {
+            CharSequence cls = node.getClassName();
+            if (cls != null && cls.toString().contains("EditText") && node.isEditable()) {
+                return AccessibilityNodeInfo.obtain(node);
+            }
+        } catch (Throwable ignored) {
+        }
+        int n = 0;
+        try {
+            n = node.getChildCount();
+        } catch (Throwable ignored) {
+        }
+        for (int i = 0; i < n; i++) {
+            AccessibilityNodeInfo child = null;
+            try {
+                child = node.getChild(i);
+            } catch (Throwable ignored) {
+            }
+            if (child == null) {
+                continue;
+            }
+            AccessibilityNodeInfo hit = findEditableRec(child, depth + 1);
+            recycle(child);
+            if (hit != null) {
+                return hit;
+            }
+        }
+        return null;
+    }
+
+    /** 往输入框写文字。 */
+    private boolean setNodeText(AccessibilityNodeInfo node, String text) {
+        try {
+            android.os.Bundle b = new android.os.Bundle();
+            b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+            boolean ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b);
+            if (ok) {
+                return true;
+            }
+            // 有些输入框不认 SET_TEXT：先点一下获得焦点，再重试
+            node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException ignored) {
+            }
+            return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b);
+        } catch (Throwable t) {
+            CheckinStatus.appendLog("写文字失败：" + t.getMessage());
+            return false;
+        }
+    }
+
+    /** 找"文字里包含关键字"的可点节点（用于点搜索结果）。 */
+    private Hit findContains(AccessibilityNodeInfo root, String[] keys) {
+        for (String k : keys) {
+            List<AccessibilityNodeInfo> nodes = null;
+            try {
+                nodes = root.findAccessibilityNodeInfosByText(k);
+            } catch (Throwable ignored) {
+            }
+            if (nodes == null) {
+                continue;
+            }
+            for (AccessibilityNodeInfo n : nodes) {
+                if (n == null) {
+                    continue;
+                }
+                AccessibilityNodeInfo clickable = clickableAncestor(n);
+                recycle(n);
+                if (clickable != null) {
+                    return new Hit(clickable, k);
+                }
+            }
+        }
+        return null;
+    }
+
+    private void recycleAll(List<AccessibilityNodeInfo> list) {
+        if (list == null) {
+            return;
+        }
+        for (AccessibilityNodeInfo n : list) {
+            recycle(n);
+        }
+    }
+
     private Hit findExact(AccessibilityNodeInfo root, String[] candidates) {
         for (String c : candidates) {
             List<AccessibilityNodeInfo> nodes;
