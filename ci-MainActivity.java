@@ -55,6 +55,7 @@ public class MainActivity extends Activity {
     private TextView tvBattery;
     private TextView tvOverlay;
     private TextView tvAutoStart;
+    private TextView tvWriteSettings;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -147,7 +148,7 @@ public class MainActivity extends Activity {
 
         // ---- 一键配置引导（新）----
         TextView secSetup = new TextView(this);
-        secSetup.setText("第一步：完成下面 6 项设置");
+        secSetup.setText("第一步：完成下面 7 项设置");
         secSetup.setTextSize(15);
         secSetup.setTextColor(Color.parseColor("#16181D"));
         secSetup.setPadding(0, 0, 0, pad / 4);
@@ -164,6 +165,7 @@ public class MainActivity extends Activity {
         tvBattery = addRow(root, "③ 电池", "检测中…");
         tvOverlay = addRow(root, "④ 悬浮窗", "检测中…");
         tvAutoStart = addRow(root, "⑤ 自启动", "需手动确认");
+        tvWriteSettings = addRow(root, "⑦ 改系统设置", "检测中…");
 
         addButton(root, "① 开启无障碍服务（最关键）", v -> openAccessibility());
         addButton(root, "② 允许通知（打卡结果要能看见）", v -> openNotification());
@@ -172,6 +174,7 @@ public class MainActivity extends Activity {
         addButton(root, "⑤ 打开自启动设置（按品牌自动跳转）",
                 v -> DeviceProfile.openAutoStartSettings(MainActivity.this));
         addButton(root, "⑥ 允许精确闹钟", v -> openExactAlarm());
+        addButton(root, "⑦ 允许修改系统设置（打完卡自动息屏）", v -> openWriteSettings());
 
         TextView secRun = new TextView(this);
         secRun.setText("第二步：确认运行状态");
@@ -266,6 +269,14 @@ public class MainActivity extends Activity {
             tvOverlay.setTextColor(ok ? OK : BAD);
             if (!ok) todo++;
         }
+        if (tvWriteSettings != null) {
+            boolean ok = android.provider.Settings.System.canWrite(this);
+            tvWriteSettings.setText(ok ? "✅ 已允许" : "❌ 未允许（点第 ⑦ 个按钮）");
+            tvWriteSettings.setTextColor(ok ? OK : BAD);
+            if (!ok) {
+                todo++;
+            }
+        }
         if (tvAutoStart != null) {
             tvAutoStart.setText("⚠️ 需手动确认（点第 ⑤ 个按钮跳转）");
             tvAutoStart.setTextColor(Color.parseColor("#B7791F"));
@@ -338,6 +349,22 @@ public class MainActivity extends Activity {
     }
 
     /** 申请通知权限（安卓 13+ 会弹系统框，低版本直接跳设置）。 */
+    /** 跳到「修改系统设置」授权页（打卡后兜底息屏要用）。 */
+    private void openWriteSettings() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Intent i = new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                        Uri.parse("package:" + getPackageName()));
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+                return;
+            }
+            startActivity(new Intent(Settings.ACTION_SETTINGS));
+        } catch (Throwable t) {
+            toast("请到 设置 → 应用 → 特殊权限 → 修改系统设置 里允许");
+        }
+    }
+
     private void openNotification() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

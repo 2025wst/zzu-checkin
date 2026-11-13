@@ -138,31 +138,46 @@ public final class CheckinAlarm {
         return any;
     }
 
-    /** 安排单个闹钟；第 0 个用闹钟模式，其余用精确闹钟。 */
+    /**
+     * 安排单个闹钟。
+     *
+     * 关键：不要先问系统的\「精确闹钟是否可用\」！
+     * Android 14+ 上只声明 USE_EXACT_ALARM 的 App，那个查询仍返回 false，
+     * 一旦据此退回"近似闹钟"，系统就会给 3~8 分钟的窗口
+     * （实测 OPPO ColorOS 16 上 21:00 拖到 21:02 才响）。
+     * 正确做法：直接排精确闹钟，抛异常了再降级。
+     */
     private static boolean armAt(Context ctx, AlarmManager am, long at, int slot) {
         PendingIntent pi = pending(ctx, slot);
-        if (slot == 0) {
-            try {
-                Intent show = new Intent(ctx, MainActivity.class);
-                show.putExtra(MainActivity.EXTRA_AUTO, true);
-                show.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                int sflags = PendingIntent.FLAG_UPDATE_CURRENT;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    sflags |= PendingIntent.FLAG_IMMUTABLE;
-                }
-                PendingIntent showPi = PendingIntent.getActivity(ctx, 2002, show, sflags);
-                am.setAlarmClock(new AlarmManager.AlarmClockInfo(at, showPi), pi);
-                return true;
-            } catch (Throwable t) {
-                CheckinStatus.appendLog("闹钟模式设置失败，退回精确闹钟：" + t.getMessage());
-            }
-        }
+
+        // ① 最强：闹钟模式（系统按"用户闹钟"对待，最不容易被压）
         try {
-            if (canExact(ctx)) {
-                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi);
-            } else {
-                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi);
+            Intent show = new Intent(ctx, MainActivity.class);
+            show.putExtra(MainActivity.EXTRA_AUTO, true);
+            show.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            int sflags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                sflags |= PendingIntent.FLAG_IMMUTABLE;
             }
+            PendingIntent showPi = PendingIntent.getActivity(ctx, 2002 + slot, show, sflags);
+            am.setAlarmClock(new AlarmManager.AlarmClockInfo(at, showPi), pi);
+            return true;
+        } catch (Throwable t) {
+            CheckinStatus.appendLog("闹钟模式失败(" + slot + ")：" + t.getMessage());
+        }
+
+        // ② 次强：精确 + 允许休眠中唤醒
+        try {
+            am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi);
+            return true;
+        } catch (Throwable t) {
+            CheckinStatus.appendLog("精确闹钟失败(" + slot + ")：" + t.getMessage());
+        }
+
+        // ③ 兜底：近似（会晚几分钟，但总比没有强）
+        try {
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi);
+            CheckinStatus.appendLog("⚠️ 只能排近似闹钟(" + slot + ")，可能延迟几分钟");
             return true;
         } catch (Throwable t) {
             CheckinStatus.appendLog("定时设置失败(" + slot + ")：" + t.getMessage());
