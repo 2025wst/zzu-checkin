@@ -48,7 +48,12 @@ public class CheckinJob extends JobService {
             // 只在真正的打卡窗口内巡检（21:00 ~ 23:30）。
             // 之前写成 "hour >= 20"，结果 20:33 / 20:47 就提前动手，
             // 白白点亮屏幕还停在"未到打卡时间"的页面上。
+            Guard.start(this);
             boolean inWindow = (hour == 21) || (hour == 22) || (hour == 23 && minute <= 30);
+            // 窗口内先确认无障碍还活着，掉了立刻告警（不要等到点才发现）
+            if (inWindow) {
+                Guard.checkAccessibility(this, true);
+            }
             boolean done = CheckinStatus.isDoneToday(this);
             boolean running = CheckinStatus.isRunning();
             if (inWindow && !done && !running) {
