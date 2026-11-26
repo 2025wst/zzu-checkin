@@ -72,6 +72,9 @@ public class MainActivity extends Activity {
         setContentView(buildUi());
         refreshUi();
         requestNotificationPermission();
+        // 常驻守护：防止被 iAware 清掉；顺带自检无障碍
+        Guard.start(this);
+        Guard.checkAccessibility(this, false);
 
         if (getIntent() != null && getIntent().getBooleanExtra(EXTRA_AUTO, false)) {
             getIntent().removeExtra(EXTRA_AUTO);
